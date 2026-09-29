@@ -1,39 +1,20 @@
 experiment_name: "deepfake_baseline_xception"
-description: "Baseline configuration using Xception backbone, 3-layer dense head, and facial coordinate integration."
+description: "Baseline configuration using Xception backbone, one ReLU dense layer, and facial coordinate integration."
 seed : 42
 data:
-  resolution: [299, 299]
-  batch_size: 32
+  batch_size: 16
   num_workers: 4
-  normalization:
-    mean: [0.485, 0.456, 0.406]
-    std: [0.229, 0.224, 0.225]
-  augmentation:
-    horizontal_flip_prob: 0.5
-    color_jitter:
-      brightness: 0.2
-      contrast: 0.2
-      saturation: 0.2
-      hue: 0.1
-
 model:
   backbone: "xception"
   pretrained: true
   freeze_backbone: false
   classifier_head:
-    type: "3_layer_dense"
+    type: "1_layer_dense"
     layers:
       - type: "Dense"
         units: 512
         activation: "relu"
         dropout: 0.5
-      - type: "Dense"
-        units: 256
-        activation: "relu"
-        dropout: 0.3
-      - type: "Dense"
-        units: 2
-        activation: "softmax"
   facial_coordinates:
     enabled: true
     fusion_method: "concatenate" # Nối vector tọa độ vào trước lớp Dense thứ 1
@@ -42,11 +23,11 @@ optimization:
   optimizer: "AdamW"
   learning_rate: 0.0001
   weight_decay: 0.01
-  loss_function: "CrossEntropyLoss"
-  scheduler:
+  loss_function: "CrossEntropyLoss" 
+  scheduler: # finetune LR của model
     type: "ReduceLROnPlateau"
     mode: "min"
-    factor: 0.1
+    factor: 0.1 # sau khi qua mức <patience> epochs mà loss ko giảm thì LR = LR*factor
     patience: 2
   early_stopping:
     patience: 5
@@ -62,3 +43,6 @@ metrics:
   - "accuracy"
   - "f1_score"
   - "roc_auc"
+
+result_paths: 'results\baseline.csv'
+checkpoint_dir: 'results\checkpoints'

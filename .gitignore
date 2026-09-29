@@ -1,2 +1,28 @@
 latex
-data
+
+data/private_test
+data/public_test
+data/splits
+data/train
+
+
+# block indices are a light + reproducible artifact -> keep in git
+# (uncomment the two lines below to exclude them)
+# data/blocks/*
+# !data/blocks/.gitkeep
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+
+# ---- Environment ----
+.venv/
+.env
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*:Zone.Identifier

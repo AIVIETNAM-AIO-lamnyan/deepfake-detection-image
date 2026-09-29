@@ -7,13 +7,16 @@ channels:
 
 dependencies:
   - python=3.11
-  - numpy
+  - "numpy<2"
   - pandas
+  - scikit-learn
   - pillow
   - pytorch
   - torchvision
   - jupyterlab
   - ipykernel
   - matplotlib
-pip: 
-  - facenet-pytorch
+  - pip
+  - pip:
+      - facenet-pytorch
+      - timm
