@@ -1,0 +1,19 @@
+name: deepfake-detection
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - pillow
+  - pytorch
+  - torchvision
+  - jupyterlab
+  - ipykernel
+  - matplotlib
+pip: 
+  - facenet-pytorch
