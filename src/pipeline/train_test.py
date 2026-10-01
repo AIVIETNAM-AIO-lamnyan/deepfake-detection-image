@@ -5,13 +5,17 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import timm
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision.io import ImageReadMode, read_image
 from src.utilities import calculate_metrics, PROJECT_ROOT
-from src.pipeline.preprocessing import get_preprocessing_transform
+from src.pipeline.preprocessing import (
+	get_test_preprocessing,
+	get_train_preprocessing,
+)
 
 
 class ImagePathDataset(Dataset):
@@ -29,8 +33,10 @@ class ImagePathDataset(Dataset):
 			mode=ImageReadMode.RGB,
 		)
 		image_tensor = self.transform(image)
+		if self.labels is None:
+			return image_tensor, Path(self.image_paths[index]).stem
 		return image_tensor, int(self.labels[index])
-		
+
 
 def build_model(model_cfg, pretrained=None):
 	backbone = timm.create_model(
@@ -38,20 +44,27 @@ def build_model(model_cfg, pretrained=None):
 		pretrained=bool(model_cfg['pretrained'] if pretrained is None else pretrained),
 		num_classes=0,
 	)
+
+	## Thêm từng classify head vào 
 	classifier_cfg = model_cfg.get('classifier_head', {})
 	classifier_layers = []
 	input_features = backbone.num_features
 	for layer_cfg in classifier_cfg.get('layers', []):
+		### lớp dense đầu tiên 
 		units = int(layer_cfg['units'])
 		classifier_layers.append(nn.Linear(input_features, units))
+
 		activation = layer_cfg.get('activation', '').lower()
 		if activation == 'relu':
 			classifier_layers.append(nn.ReLU())
+
 		dropout = float(classifier_cfg.get('dropout', layer_cfg.get('dropout', 0)))
 		if dropout:
 			classifier_layers.append(nn.Dropout(dropout))
+
 		input_features = units
 	classifier_layers.append(nn.Linear(input_features, 2))
+
 	model = nn.Sequential(backbone, nn.Sequential(*classifier_layers))
 
 	freeze_backbone = bool(model_cfg.get('freeze_backbone', False))
@@ -71,9 +84,16 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 		torch.backends.cudnn.deterministic = True
 		torch.backends.cudnn.benchmark = False
 
-	transform = get_preprocessing_transform()
-	train_dataset = ImagePathDataset(X_train, y_train, transform=transform)
-	val_dataset = ImagePathDataset(X_val, y_val, transform=transform)
+	train_dataset = ImagePathDataset(
+		X_train,
+		y_train,
+		transform=get_train_preprocessing(),
+	)
+	val_dataset = ImagePathDataset(
+		X_val,
+		y_val,
+		transform=get_test_preprocessing(),
+	)
 	train_loader = DataLoader(
 		train_dataset,
 		**cfg['data'],
@@ -84,17 +104,10 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 		**cfg['data']
 	)
 
-	### MODEL ###
+	### MODEL & trainning ###
 	model_cfg = cfg['model']
 	model, backbone = build_model(model_cfg)
 	freeze_backbone = bool(model_cfg.get('freeze_backbone', False))
-
-	if model_cfg.get('facial_coordinates', {}).get('enabled', False):
-		warnings.warn(
-			'facial_coordinates.enabled is true, but this dataset currently returns '
-			'only images and labels; coordinate fusion is not applied.',
-			RuntimeWarning,
-		)
 
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	model = model.to(device)
@@ -121,9 +134,10 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 	early_stopping_cfg = optimization_cfg.get('early_stopping', {})
 	early_stopping_patience = int(early_stopping_cfg.get('patience', 0))
 	best_val_loss = float('inf')
-	best_metrics = None
 	epochs_without_improvement = 0
 	max_epochs = int(optimization_cfg['max_epochs'])
+
+
 	checkpoint_dir = PROJECT_ROOT / cfg['checkpoint_dir']
 	checkpoint_dir.mkdir(parents=True, exist_ok=True)
 	checkpoint_path = checkpoint_dir / f"{cfg['experiment_name']}_{fold}.pt"
@@ -159,6 +173,9 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 				validation_predictions.append(logits.argmax(dim=1).cpu().numpy())
 				positive_scores.append(torch.softmax(logits, dim=1)[:, 1].cpu().numpy())
 
+
+		### SAVING RESULTS
+
 		y_true = np.concatenate(validation_labels).astype(np.int64)
 		y_pred = np.concatenate(validation_predictions).astype(np.int64)
 		y_score = np.concatenate(positive_scores)
@@ -169,6 +186,9 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 			y_score=y_score,
 			val_loss=val_loss,
 		)
+		epoch_metrics = {'fold': fold, 'epoch': epoch, **metrics}
+		save_epoch(epoch_metrics, cfg)
+
 		if scheduler is not None:
 			scheduler.step(val_loss)
 		print(
@@ -179,7 +199,6 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 
 		if val_loss < best_val_loss:
 			best_val_loss = val_loss
-			best_metrics = metrics
 			epochs_without_improvement = 0
 			torch.save({
 				'model_state_dict': {
@@ -198,5 +217,70 @@ def train_and_evaluate(fold, X_train, y_train, X_val, y_val, cfg):
 			if early_stopping_patience and epochs_without_improvement >= early_stopping_patience:
 				print(f"Early stopping after epoch {epoch}.")
 				break
+		
+	return 1
 
-	return best_metrics
+
+def test(cfg, fold=None):
+	test_cfg = cfg['public_test']
+	fold = fold or test_cfg['checkpoint_fold']
+	checkpoint_path = (
+		PROJECT_ROOT
+		/ cfg['checkpoint_dir']
+		/ f"{cfg['experiment_name']}_{fold}.pt"
+	)
+
+	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+	checkpoint = torch.load(checkpoint_path, map_location=device)
+	model, _ = build_model(checkpoint['model_config'], pretrained=False)
+	model.load_state_dict(checkpoint['model_state_dict'])
+	model = model.to(device).eval()
+
+	manifest_path = PROJECT_ROOT / test_cfg['manifest_path']
+	manifest = pd.read_csv(manifest_path)
+	image_paths = [PROJECT_ROOT / path for path in manifest['path']]
+	testset = ImagePathDataset(
+		image_paths,
+		labels=None,
+		transform=get_test_preprocessing(),
+	)
+	loader = DataLoader(
+		testset,
+		**{**cfg['data'], 'shuffle': False},
+	)
+	predictions = []
+	with torch.inference_mode():
+		for images, image_ids in loader:
+			probabilities = torch.softmax(model(images.to(device)), dim=1)
+			predicted_classes = probabilities.argmax(dim=1).cpu().tolist()
+			probabilities = probabilities.cpu().tolist()
+			predictions.extend(
+				{
+					'image_id': image_id,
+					'prediction': predicted_class,
+					'probability_0': probability[0],
+					'probability_1': probability[1],
+				}
+				for image_id, predicted_class, probability
+				in zip(image_ids, predicted_classes, probabilities)
+			)
+
+	output_path = PROJECT_ROOT / test_cfg['predictions_path']
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	output_path = output_path.with_name(
+		f'{output_path.stem}_{fold}{output_path.suffix}'
+	)
+	pd.DataFrame(predictions).to_csv(output_path, index=False)
+	print(f'Saved public-test predictions to {output_path}')
+	return predictions
+
+
+def save_epoch(epoch_metrics, cfg):
+	path = PROJECT_ROOT / cfg['epoch_path']
+	path.parent.mkdir(parents=True, exist_ok=True)
+	pd.DataFrame([epoch_metrics]).to_csv(
+		path,
+		mode='a',
+		header=not path.exists(),
+		index=False,
+	)
